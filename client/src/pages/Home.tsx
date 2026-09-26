@@ -14,6 +14,7 @@ import {
   Menu,
   RefreshCw,
   Sparkles,
+  Zap,
   WandSparkles,
   X,
 } from "lucide-react";
@@ -21,6 +22,30 @@ import {
 const ACCEPTED = ["image/jpeg", "image/png", "image/webp"];
 
 type BgMode = "transparent" | "white" | "warm";
+type ProcessingStage = "idle" | "analyzing" | "refining" | "ready";
+
+const resizeForPreview = async (imageFile: File, maxSide = 960): Promise<Blob> => {
+  const bitmap = await createImageBitmap(imageFile);
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas unavailable");
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Preview unavailable")), "image/jpeg", 0.86));
+};
+
+type RemovalConfig = Parameters<typeof removeBackground>[1];
+const removeWithLocalAcceleration = async (image: Blob, config: RemovalConfig) => {
+  try {
+    return await removeBackground(image, { ...config, device: "gpu" });
+  } catch (gpuError) {
+    console.info("WebGPU unavailable; using local CPU fallback.", gpuError);
+    return removeBackground(image, { ...config, device: "cpu" });
+  }
+};
 
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -31,6 +56,8 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [stage, setStage] = useState<ProcessingStage>("idle");
+  const [phase, setPhase] = useState("");
   const [error, setError] = useState("");
   const [bgMode, setBgMode] = useState<BgMode>("transparent");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -67,19 +94,51 @@ export default function Home() {
     if (!file) return;
     setProcessing(true);
     setError("");
-    setProgress(4);
+    setProgress(3);
+    setStage("analyzing");
+    setPhase("تحليل سريع للصورة");
+    let previewReady = false;
     try {
-      const blob = await removeBackground(file, {
+      // المرحلة الأولى: نموذج كمّي صغير + نسخة مصغّرة = نتيجة أولية أسرع بكثير.
+      const previewBlob = await removeWithLocalAcceleration(await resizeForPreview(file), {
+        model: "isnet_quint8",
+        output: { format: "image/png", quality: 0.86 },
         progress: (_key, current, total) => {
-          if (total) setProgress(Math.max(6, Math.min(96, Math.round((current / total) * 100))));
+          if (total) setProgress(Math.max(8, Math.min(48, Math.round((current / total) * 48))));
         },
       });
-      setResultBlob(blob);
-      setResultUrl(URL.createObjectURL(blob));
+      setResultBlob(previewBlob);
+      setResultUrl(URL.createObjectURL(previewBlob));
+      previewReady = true;
+      setStage("refining");
+      setPhase("تنقية الحواف والتفاصيل");
+      setProgress(55);
+
+      // المرحلة الثانية: نحدد سقفاً ذكياً للدقة كي لا تتأخر الصور الكبيرة.
+      const refinedInput = await resizeForPreview(file, 1800);
+      const refinedBlob = await removeWithLocalAcceleration(refinedInput, {
+        model: "isnet_fp16",
+        output: { format: "image/png", quality: 1 },
+        progress: (_key, current, total) => {
+          if (total) setProgress(Math.max(56, Math.min(98, 56 + Math.round((current / total) * 42))));
+        },
+      });
+      setResultBlob(refinedBlob);
+      setResultUrl(URL.createObjectURL(refinedBlob));
+      setStage("ready");
+      setPhase("اكتملت النتيجة بدقة عالية");
       setProgress(100);
     } catch (err) {
       console.error(err);
-      setError("تعذر معالجة الصورة الآن. جرّب صورة أخرى أو أعد المحاولة.");
+      // إذا فشل التحسين، لا نخسر المعاينة السريعة التي ظهرت للمستخدم.
+      if (previewReady) {
+        setStage("ready");
+        setPhase("تم عرض المعاينة السريعة");
+        setError("اكتملت المعاينة السريعة، لكن تعذر تحسين الدقة. يمكنك تنزيلها أو إعادة المحاولة.");
+      } else {
+        setStage("idle");
+        setError("تعذر معالجة الصورة الآن. جرّب صورة أخرى أو أعد المحاولة.");
+      }
     } finally {
       setProcessing(false);
     }
@@ -92,6 +151,8 @@ export default function Home() {
     setResultBlob(null);
     setError("");
     setProgress(0);
+    setStage("idle");
+    setPhase("");
   };
 
   const download = async () => {
@@ -170,10 +231,11 @@ export default function Home() {
                   <div className="preview-panel"><span className="panel-label">الأصل</span><img src={sourceUrl} alt="الصورة الأصلية" /></div>
                   <div className={`preview-panel result-panel ${hasResult ? "ready" : ""}`}><span className="panel-label">النتيجة الذكية</span>{hasResult ? <div className="checker"><img src={resultUrl} alt="الصورة بعد إزالة الخلفية" /></div> : <div className="empty-result"><WandSparkles size={25} /><span>{processing ? "نحلل الصورة ونفصل العناصر..." : "جاهزة للمعالجة"}</span></div>}</div>
                 </div>
-                {processing && <div className="progress-row"><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><span>{progress}%</span></div>}
+                {(processing || stage === "ready") && <div className="stage-rail"><div className={stage !== "idle" ? "stage active" : "stage"}><span>{stage === "analyzing" ? <Loader2 size={12} className="spin" /> : <Zap size={12} />}</span><b>تحليل سريع</b></div><div className={stage === "refining" || stage === "ready" ? "stage active" : "stage"}><span>{stage === "refining" ? <Loader2 size={12} className="spin" /> : <Layers3 size={12} />}</span><b>تنقية الحواف</b></div><div className={stage === "ready" ? "stage active" : "stage"}><span><Check size={12} /></span><b>جاهز</b></div></div>}
+                {(processing || stage === "ready") && <div className="progress-row"><div className="progress-track"><div style={{ width: `${progress}%` }} /></div><span>{processing ? phase : "100% محلي"}</span></div>}
                 {error && <div className="error-message"><CircleHelp size={15} /> {error}</div>}
                 <div className="workspace-actions">
-                  {!hasResult ? <button className="primary-button process-button" onClick={processImage} disabled={processing}>{processing ? <><Loader2 size={18} className="spin" /> جارٍ التحليل الذكي...</> : <><WandSparkles size={18} /> إزالة الخلفية</>}</button> : <><div className="background-picker"><span>الخلفية</span><button className={bgMode === "transparent" ? "active" : ""} onClick={() => setBgMode("transparent")}><i className="checker-mini" /> شفافة</button><button className={bgMode === "white" ? "active" : ""} onClick={() => setBgMode("white")}><i className="white-mini" /> بيضاء</button><button className={bgMode === "warm" ? "active" : ""} onClick={() => setBgMode("warm")}><i className="warm-mini" /> دافئة</button></div><button className="primary-button process-button" onClick={download}><Download size={18} /> تنزيل الصورة</button></>}
+                  {!hasResult ? <button className="primary-button process-button" onClick={processImage} disabled={processing}>{processing ? <><Loader2 size={18} className="spin" /> {phase}</> : <><WandSparkles size={18} /> إزالة الخلفية</>}</button> : <><div className="background-picker"><span>الخلفية</span><button className={bgMode === "transparent" ? "active" : ""} onClick={() => setBgMode("transparent")}><i className="checker-mini" /> شفافة</button><button className={bgMode === "white" ? "active" : ""} onClick={() => setBgMode("white")}><i className="white-mini" /> بيضاء</button><button className={bgMode === "warm" ? "active" : ""} onClick={() => setBgMode("warm")}><i className="warm-mini" /> دافئة</button></div><button className="primary-button process-button" onClick={download} disabled={processing}><Download size={18} /> {processing ? "نحسّن النتيجة..." : "تنزيل الصورة"}</button></>}
                 </div>
               </div>
             )}
@@ -187,7 +249,7 @@ export default function Home() {
           <div className="feature-grid">
             <article className="feature-card featured-card"><div className="feature-visual visual-orbit"><div className="orbit orbit-a" /><div className="orbit orbit-b" /><div className="orbit-core"><WandSparkles size={25} /></div></div><div className="feature-number">01</div><h3>يفهم كل عنصر</h3><p>يتعرّف على الأشخاص، المنتجات، الحيوانات، وحتى التفاصيل الصغيرة.</p></article>
             <article className="feature-card"><div className="feature-visual visual-edge"><div className="edge-line" /><span>حواف طبيعية</span></div><div className="feature-number">02</div><h3>حواف لا تُلاحظ</h3><p>شعر، زجاج، وأطراف معقدة — نتيجة نظيفة تحافظ على التفاصيل.</p></article>
-            <article className="feature-card"><div className="feature-visual visual-speed"><span className="speed-number">2.4<span>s</span></span><div className="speed-line" /></div><div className="feature-number">03</div><h3>بسرعة البرق</h3><p>من الرفع إلى النتيجة في ثوانٍ، مباشرة من متصفحك.</p></article>
+            <article className="feature-card"><div className="feature-visual visual-speed"><span className="speed-number">GPU</span><div className="speed-line" /></div><div className="feature-number">03</div><h3>نتيجة تظهر أولاً</h3><p>معاينة سريعة تسبق التنقية النهائية، مباشرة من جهازك.</p></article>
           </div>
         </section>
 
