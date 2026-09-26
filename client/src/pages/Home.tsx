@@ -6,12 +6,15 @@ import {
   Check,
   ChevronDown,
   CircleHelp,
+  Copy,
   Download,
   ImagePlus,
+  Lightbulb,
   Layers3,
   Loader2,
   LockKeyhole,
   Menu,
+  Palette,
   RefreshCw,
   Sparkles,
   Zap,
@@ -23,6 +26,7 @@ const ACCEPTED = ["image/jpeg", "image/png", "image/webp"];
 
 type BgMode = "transparent" | "white" | "warm";
 type ProcessingStage = "idle" | "analyzing" | "refining" | "ready";
+type ColorToken = { hex: string; rgb: string; r: number; g: number; b: number; percent: number };
 
 const resizeForPreview = async (imageFile: File, maxSide = 960): Promise<Blob> => {
   const bitmap = await createImageBitmap(imageFile);
@@ -47,6 +51,46 @@ const removeWithLocalAcceleration = async (image: Blob, config: RemovalConfig) =
   }
 };
 
+const toHex = (value: number) => value.toString(16).padStart(2, "0").toUpperCase();
+const colorHex = (r: number, g: number, b: number) => `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+const luminance = (r: number, g: number, b: number) => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+
+const extractPalette = async (imageFile: File): Promise<ColorToken[]> => {
+  const bitmap = await createImageBitmap(imageFile);
+  const canvas = document.createElement("canvas");
+  const size = 150;
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Canvas unavailable");
+  context.drawImage(bitmap, 0, 0, size, size);
+  bitmap.close();
+  const pixels = context.getImageData(0, 0, size, size).data;
+  const buckets = new Map<string, { r: number; g: number; b: number; count: number }>();
+  for (let i = 0; i < pixels.length; i += 16) {
+    const alpha = pixels[i + 3];
+    if (alpha < 45) continue;
+    const quantize = (value: number) => Math.min(255, Math.floor(value / 32) * 32 + 16);
+    const r = quantize(pixels[i]);
+    const g = quantize(pixels[i + 1]);
+    const b = quantize(pixels[i + 2]);
+    const key = `${r}-${g}-${b}`;
+    const existing = buckets.get(key) || { r, g, b, count: 0 };
+    existing.count += 1;
+    buckets.set(key, existing);
+  }
+  const colors = Array.from(buckets.values());
+  const total = colors.reduce((sum, item) => sum + item.count, 0) || 1;
+  const selected: typeof colors = [];
+  for (const item of colors.sort((a, b) => b.count - a.count)) {
+    const farEnough = selected.every((other) => Math.abs(item.r - other.r) + Math.abs(item.g - other.g) + Math.abs(item.b - other.b) > 48);
+    if (farEnough) selected.push(item);
+    if (selected.length === 6) break;
+  }
+  return selected
+    .map((item) => ({ hex: colorHex(item.r, item.g, item.b), rgb: `${item.r}, ${item.g}, ${item.b}`, ...item, percent: Math.max(1, Math.round((item.count / total) * 100)) }));
+};
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -61,6 +105,9 @@ export default function Home() {
   const [error, setError] = useState("");
   const [bgMode, setBgMode] = useState<BgMode>("transparent");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [palette, setPalette] = useState<ColorToken[]>([]);
+  const [paletteLoading, setPaletteLoading] = useState(false);
+  const [copiedHex, setCopiedHex] = useState("");
 
   useEffect(() => () => {
     if (sourceUrl) URL.revokeObjectURL(sourceUrl);
@@ -83,6 +130,8 @@ export default function Home() {
     setResultUrl("");
     setResultBlob(null);
     setProgress(0);
+    setPaletteLoading(true);
+    extractPalette(nextFile).then(setPalette).catch(() => setPalette([])).finally(() => setPaletteLoading(false));
   }, []);
 
   const handleInput = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -153,6 +202,14 @@ export default function Home() {
     setProgress(0);
     setStage("idle");
     setPhase("");
+    setPalette([]);
+    setCopiedHex("");
+  };
+
+  const copyColor = async (hex: string) => {
+    await navigator.clipboard?.writeText(hex);
+    setCopiedHex(hex);
+    window.setTimeout(() => setCopiedHex(""), 1400);
   };
 
   const download = async () => {
@@ -179,6 +236,10 @@ export default function Home() {
   };
 
   const hasResult = Boolean(resultUrl);
+  const primaryColor = palette[0]?.hex || "#173D34";
+  const accentColor = palette[1]?.hex || "#D9EF74";
+  const surfaceColor = palette.find((color) => luminance(color.r, color.g, color.b) > 0.78)?.hex || "#F7F8F4";
+  const readableText = luminance(palette[0]?.r || 23, palette[0]?.g || 61, palette[0]?.b || 52) > 0.62 ? "#17201C" : "#FFFFFF";
 
   return (
     <div dir="rtl" className="app-shell">
@@ -191,6 +252,7 @@ export default function Home() {
           <nav className="desktop-nav">
             <a href="#how">كيف يعمل</a>
             <a href="#features">المميزات</a>
+            <a href="#palette">الألوان</a>
             <a href="#privacy">الخصوصية</a>
           </nav>
           <div className="nav-actions">
@@ -199,7 +261,7 @@ export default function Home() {
             <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="فتح القائمة"><Menu size={20} /></button>
           </div>
         </div>
-        {menuOpen && <div className="mobile-menu"><a href="#how" onClick={() => setMenuOpen(false)}>كيف يعمل</a><a href="#features" onClick={() => setMenuOpen(false)}>المميزات</a><a href="#privacy" onClick={() => setMenuOpen(false)}>الخصوصية</a></div>}
+        {menuOpen && <div className="mobile-menu"><a href="#how" onClick={() => setMenuOpen(false)}>كيف يعمل</a><a href="#features" onClick={() => setMenuOpen(false)}>المميزات</a><a href="#palette" onClick={() => setMenuOpen(false)}>الألوان</a><a href="#privacy" onClick={() => setMenuOpen(false)}>الخصوصية</a></div>}
       </header>
 
       <main id="top">
@@ -251,6 +313,26 @@ export default function Home() {
             <article className="feature-card"><div className="feature-visual visual-edge"><div className="edge-line" /><span>حواف طبيعية</span></div><div className="feature-number">02</div><h3>حواف لا تُلاحظ</h3><p>شعر، زجاج، وأطراف معقدة — نتيجة نظيفة تحافظ على التفاصيل.</p></article>
             <article className="feature-card"><div className="feature-visual visual-speed"><span className="speed-number">GPU</span><div className="speed-line" /></div><div className="feature-number">03</div><h3>نتيجة تظهر أولاً</h3><p>معاينة سريعة تسبق التنقية النهائية، مباشرة من جهازك.</p></article>
           </div>
+        </section>
+
+        <section id="palette" className="palette-section">
+          <div className="section-kicker">Color intelligence</div>
+          <div className="palette-heading"><div><h2>كل لون في الصورة،<br /><span>له استخدام.</span></h2><p>استخرج لوحة ألوان جاهزة للتصميم، مع أكواد HEX وRGB واقتراحات عملية لواجهتك.</p></div><div className="palette-badge"><Palette size={17} /><span>{palette.length ? `${palette.length} ألوان مستخرجة` : "ارفع صورة لاستخراج الألوان"}</span></div></div>
+          <div className="palette-layout">
+            <div className="palette-card">
+              {!file ? <div className="palette-empty"><Palette size={27} /><b>لوحة الألوان تظهر هنا</b><span>ارفع صورة من الأعلى وسأستخرج الألوان المهيمنة منها تلقائياً.</span></div> : paletteLoading ? <div className="palette-empty"><Loader2 size={27} className="spin" /><b>نقرأ ألوان الصورة...</b><span>نحلل البكسلات محلياً على جهازك.</span></div> : <div className="swatch-list">{palette.map((color, index) => <button className="swatch-row" key={color.hex} onClick={() => copyColor(color.hex)}><span className="swatch-color" style={{ background: color.hex }} /><span className="swatch-index">0{index + 1}</span><span className="swatch-values"><b>{color.hex}</b><small>RGB&nbsp; {color.rgb}</small></span><span className="swatch-percent">{color.percent}%</span><span className="copy-button">{copiedHex === color.hex ? <Check size={15} /> : <Copy size={14} />}</span></button>)}</div>}
+            </div>
+            <div className="gui-card" style={{ background: primaryColor, color: readableText }}>
+              <div className="gui-card-top"><span><Lightbulb size={15} /> اقتراح GUI</span><span className="gui-live">LIVE</span></div>
+              <h3>استخدمها كذا<br /><em>لواجهة متوازنة.</em></h3>
+              <div className="gui-demo" style={{ background: surfaceColor }}>
+                <div className="gui-demo-nav"><span className="demo-dot" style={{ background: accentColor }} /><span style={{ color: primaryColor }}>منتجك</span><span className="demo-lines" /></div>
+                <div className="gui-demo-body"><span className="demo-title" style={{ color: primaryColor }}>عنوان واضح</span><span className="demo-copy" style={{ background: `${primaryColor}35` }} /><button style={{ background: accentColor, color: primaryColor }}>ابدأ الآن</button></div>
+              </div>
+              <div className="gui-roles"><span><i style={{ background: primaryColor }} /> Primary</span><span><i style={{ background: accentColor }} /> Accent</span><span><i style={{ background: surfaceColor }} /> Surface</span></div>
+            </div>
+          </div>
+          <div className="tips-grid"><div className="tip"><span className="tip-icon"><Palette size={16} /></span><div><b>60% للسطح</b><p>استخدم اللون الأفتح كخلفية ومساحات واسعة حتى تتنفس الواجهة.</p></div></div><div className="tip"><span className="tip-icon"><Layers3 size={16} /></span><div><b>30% للهوية</b><p>اجعل اللون المهيمن للعناوين، الشريط العلوي، والعناصر المهمة.</p></div></div><div className="tip"><span className="tip-icon"><Lightbulb size={16} /></span><div><b>10% للفت الانتباه</b><p>استخدم اللون البارز للأزرار والتنبيهات، لا لكل شيء.</p></div></div></div>
         </section>
 
         <section id="how" className="steps-section"><div className="steps-intro"><div className="section-kicker">ثلاث خطوات فقط</div><h2>من صورة عادية<br /><span>إلى شيء مميز.</span></h2></div><div className="steps-list"><div className="step"><span>01</span><div><h3>ارفع صورتك</h3><p>اسحب الصورة إلى المساحة أو اخترها من جهازك.</p></div></div><div className="step"><span>02</span><div><h3>دع الذكاء يعمل</h3><p>شفّاف يحدد العناصر ويفصل الخلفية تلقائياً.</p></div></div><div className="step"><span>03</span><div><h3>نزّل وابدأ</h3><p>احصل على PNG شفاف جاهز للتصميم والاستخدام.</p></div></div></div></section>
