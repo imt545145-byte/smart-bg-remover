@@ -339,7 +339,7 @@ export default function Home() {
 
         <section id="privacy" className="privacy-banner"><div><div className="section-kicker">خصوصيتك أولاً</div><h2>صورك لك.<br /><span>دائماً.</span></h2><p>المعالجة تتم داخل جهازك. لا رفع للسحابة، لا تخزين، ولا مفاجآت.</p></div><div className="privacy-seal"><LockKeyhole size={25} /><span>خصوصية<br />100%</span></div></section>
       </main>
-      <footer><div className="brand"><span className="brand-mark"><Sparkles size={14} /></span><span>شفّاف</span></div><span>صُمم ليجعل صورك أوضح.</span><span>© 2026 شفّاف</span></footer>
+      <footer><div className="brand"><span className="brand-mark"><Sparkles size={14} /></span><span>شفّاف</span></div></footer>
     </div>
   );
 }
